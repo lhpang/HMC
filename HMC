@@ -1,0 +1,197 @@
+import torch
+import numpy as np
+
+class BayesianHMCWithinGibbs:
+    def __init__(self, learning_rate=0.001, epochs=1000, tolerance=1e-4, q=3):
+        self.learning_rate = learning_rate
+        self.epochs = epochs
+        self.tolerance = tolerance
+        self.q = q
+        self.lambda_param = None
+        self.X = None
+        self.u_param = None
+        self.sigma2_param = None
+        self.tau2 = None
+        self.loss_history = []
+        self.log_likelihood_history = []
+        self.log_prior_history = []
+
+    def compute_u_param(self, X):
+        Q, R = torch.linalg.qr(X)
+        return Q
+
+    def update_sigma2_param(self, X, lambda_param, Y):
+        N = X.shape[0]
+        q = X.shape[1]
+        M = Y.shape[0]
+        self.u_param = self.compute_u_param(X)
+        sqrt_lambda = torch.sqrt(torch.abs(lambda_param))
+        latent_effect = torch.matmul(sqrt_lambda.unsqueeze(1) * self.u_param,
+                                     sqrt_lambda.unsqueeze(1) * self.u_param.transpose(-1, -2))
+        upper_indices = torch.triu_indices(N, N, offset=1)
+        latent_effect_reshaped = latent_effect[:, upper_indices[0], upper_indices[1]]
+        y_reshaped = Y[:, upper_indices[0], upper_indices[1]]
+        residuals = torch.sum((y_reshaped - latent_effect_reshaped) ** 2, dim=0)
+        t = int(N * (N - 1) / 2)  # Number of upper-triangular elements in Y
+        df = M * t - M * q - N * q
+        self.sigma2_param = residuals / df
+
+    def log_prior_X(self, X):
+        trace_term = torch.trace(X @ X.t())
+        N, q = X.shape
+        return -0.5 * trace_term - (N * q / 2) * torch.log(torch.tensor(2 * torch.pi))
+
+    def log_prior_lambda(self, Lambda, tau):
+        n, p = Lambda.shape
+        tau2 = torch.full((n + p,), 1000)
+        row_variances = tau2[:n]
+        column_variances = tau2[n:n+p]
+        epsilon = 1e-6
+        row_variances = torch.clamp(row_variances, min=epsilon)
+        column_variances = torch.clamp(column_variances, min=epsilon)
+        log_det_U = torch.sum(torch.log(row_variances))
+        log_det_V = torch.sum(torch.log(column_variances))
+        trace_term = torch.sum((Lambda ** 2) / (row_variances.view(-1, 1) * column_variances.view(1, -1)))
+        log_prob = (
+            -0.5 * n * p * torch.log(torch.tensor(2 * torch.pi, dtype=Lambda.dtype, device=Lambda.device))
+            - 0.5 * p * log_det_U
+            - 0.5 * n * log_det_V
+            - 0.5 * trace_term
+        )
+        return log_prob
+
+    def log_likelihood(self, Y, lambda_param, X):
+        M, N, _ = Y.shape
+        u_param = self.compute_u_param(X)
+        lambda_u = lambda_param.unsqueeze(1) * u_param
+        latent_effect = torch.matmul(lambda_u, u_param.transpose(-1, -2))
+        upper_indices = torch.triu_indices(N, N, offset=1)
+        latent_effect_reshaped = latent_effect[:, upper_indices[0], upper_indices[1]]
+        y_reshaped = Y[:, upper_indices[0], upper_indices[1]]
+        residuals = y_reshaped - latent_effect_reshaped
+        return -0.5 * torch.sum(residuals ** 2 / self.sigma2_param)
+
+    def hmc_update(self, param, log_prob_fn, step_size=0.01, num_steps=10):
+        """Perform HMC updates."""
+        param.requires_grad_(True)
+        momentum = torch.randn_like(param)
+        current_param = param.clone()
+        current_momentum = momentum.clone()
+
+        # Compute initial Hamiltonian
+        log_prob = log_prob_fn(param)
+        grad = torch.autograd.grad(log_prob, param, create_graph=True)[0]
+        kinetic_energy = 0.5 * torch.sum(momentum ** 2)
+        initial_hamiltonian = -log_prob + kinetic_energy
+
+        # Leapfrog integration
+        for _ in range(num_steps):
+            momentum = momentum + 0.5 * step_size * grad
+            param = param + step_size * momentum
+            log_prob = log_prob_fn(param)
+            grad = torch.autograd.grad(log_prob, param, create_graph=True)[0]
+            momentum = momentum + 0.5 * step_size * grad
+
+        # Compute new Hamiltonian
+        kinetic_energy = 0.5 * torch.sum(momentum ** 2)
+        new_hamiltonian = -log_prob + kinetic_energy
+
+        # Metropolis acceptance step
+        acceptance_prob = torch.exp(initial_hamiltonian - new_hamiltonian)
+        if torch.rand(1).item() < acceptance_prob:
+            return param.detach()
+        else:
+            return current_param.detach()
+
+    def plot_traces(self, lambda_trace, X_trace, sigma2_trace, parameter_name=None, index=None):
+
+       epochs = len(sigma2_trace)
+
+       if parameter_name == "lambda_param":
+           i, j = index
+           plt.figure()
+           plt.plot(range(epochs), lambda_trace[:, i, j], label=f"lambda[{i},{j}]")
+           plt.title(f"Trace Plot of lambda[{i},{j}]")
+           plt.xlabel("Epoch")
+           plt.ylabel("Value")
+           plt.legend()
+           plt.show()
+
+       elif parameter_name == "X":
+           i, j = index
+           plt.figure()
+           plt.plot(range(epochs), X_trace[:, i, j], label=f"X[{i},{j}]")
+           plt.title(f"Trace Plot of X[{i},{j}]")
+           plt.xlabel("Epoch")
+           plt.ylabel("Value")
+           plt.legend()
+           plt.show()
+
+       elif parameter_name == "sigma2_param":
+           i = index
+           plt.figure()
+           plt.plot(range(epochs), sigma2_trace[i], label=f"sigma2_param[{i}]")
+           plt.title(f"Trace Plot of sigma2_param[{i}]")
+           plt.xlabel("Epoch")
+           plt.ylabel("Value")
+           plt.legend()
+           plt.show()
+
+
+
+    def fit(self, Y):
+        M, N, _ = Y.shape
+        q = self.q
+
+        # Initialize parameters
+        '''
+        self.lambda_param = torch.randn((M, q), requires_grad=True)
+        self.X = torch.randn((N, q), requires_grad=True)
+        self.update_sigma2_param(self.X, self.lambda_param, Y)
+        self.tau2 =  1/torch.distributions.Gamma(3, 2000).sample((M+q,))
+        '''
+
+        self.lambda_param = lamb_0.clone().detach()
+        self.X = x_0.clone().detach()
+        self.sigma2_param = sigma2_0.clone().detach()
+        self.tau2 = tau2_0.clone().detach()
+
+        lambda_trace = []
+        X_trace = []
+        sigma2_trace = []
+
+        lambda_trace.append(self.lambda_param.clone().detach())
+        X_trace.append(self.X.clone().detach())
+        sigma2_trace.append(self.sigma2_param.clone().detach().numpy())
+
+
+        for epoch in range(self.epochs):
+            # Update lambda_param using NUTS
+            self.lambda_param = self.hmc_update(
+                self.lambda_param,
+                lambda p: self.log_prior_lambda(self.lambda_param, self.tau2) + self.log_likelihood(Y, p, self.X),
+                step_size=0.01,
+                num_steps=10,
+            )
+
+            # Update X using HMC
+            self.X = self.hmc_update(
+                self.X,
+                lambda x: self.log_prior_X(x) + self.log_likelihood(Y, self.lambda_param, x),
+                step_size=0.01,
+                num_steps=10,
+            )
+
+            # Update u_param and sigma2_param
+            self.u_param = self.compute_u_param(self.X)
+            self.update_sigma2_param(self.X, self.lambda_param, Y)
+
+            lambda_trace.append(self.lambda_param.clone().detach())
+            X_trace.append(self.X.clone().detach())
+            sigma2_trace.append(self.sigma2_param.clone().detach().numpy())
+
+        lambda_trace = torch.stack(lambda_trace).numpy()
+        X_trace = torch.stack(X_trace).numpy()
+        sigma2_trace = np.array(sigma2_trace)
+
+        return self.lambda_param, self.X, self.u_param, self.sigma2_param, lambda_trace, X_trace, sigma2_trace
