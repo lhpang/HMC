@@ -1,0 +1,61 @@
+# Define a 50-dimensional Gaussian target distribution
+dim = 50  # Dimensionality
+np.random.seed(42)  # Set seed for reproducibility
+
+# Mean vector: 50 zeros
+mu = np.zeros(dim)
+
+# Covariance matrix: Strong correlations
+cov = 0.5 * np.eye(dim) + 0.5 * np.ones((dim, dim))
+
+# Compare HMC and MH
+results = {}
+
+# Hamiltonian Monte Carlo (HMC)
+with pm.Model() as hmc_model:
+    x = pm.MvNormal("x", mu=mu, cov=cov, shape=dim)
+    
+    start_time_hmc = time.time()
+    hmc_trace = pm.sample(
+        draws=1000,  # Number of posterior samples
+        tune=1000,   # Tuning iterations
+        #step=pm.HamiltonianMC(),
+        return_inferencedata=True
+    )
+    end_time_hmc = time.time()
+    results['HMC_Time'] = end_time_hmc - start_time_hmc
+
+# Metropolis-Hastings (MH)
+with pm.Model() as mh_model:
+    x = pm.MvNormal("x", mu=mu, cov=cov, shape=dim)
+    
+    start_time_mh = time.time()
+    mh_trace = pm.sample(
+        draws=1000,  # Number of posterior samples
+        tune=1000,   # Tuning iterations
+        step=pm.Metropolis(),
+        return_inferencedata=True
+    )
+    end_time_mh = time.time()
+    results['MH_Time'] = end_time_mh - start_time_mh
+
+# Summarize ESS and runtime
+hmc_ess = az.ess(hmc_trace).to_array().mean().values
+mh_ess = az.ess(mh_trace).to_array().mean().values
+
+# Calculate ESS
+hmc_ess = az.ess(hmc_trace)
+mh_ess = az.ess(mh_trace)
+
+hmc_ess_mean = hmc_ess.to_array().mean().values
+mh_ess_mean = mh_ess.to_array().mean().values
+
+# Print results
+print(f"HMC Effective Sample Size: {hmc_ess_mean:.2f}")
+print(f"MH Effective Sample Size: {mh_ess_mean:.2f}")
+
+# Print results
+print(f"HMC Time: {results['HMC_Time']:.2f} seconds")
+print(f"MH Time: {results['MH_Time']:.2f} seconds")
+print(f"HMC Effective Sample Size: {hmc_ess:.2f}")
+print(f"MH Effective Sample Size: {mh_ess:.2f}")
